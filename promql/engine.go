@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"reflect"
 	"runtime"
@@ -30,10 +31,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/common/promslog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -125,7 +125,11 @@ type QueryEngine interface {
 // QueryLogger is an interface that can be used to log all the queries logged
 // by the engine.
 type QueryLogger interface {
-	Log(...interface{}) error
+	Error(msg string, args ...any)
+	Info(msg string, args ...any)
+	Debug(msg string, args ...any)
+	Warn(msg string, args ...any)
+	With(args ...any)
 	Close() error
 }
 
@@ -288,7 +292,7 @@ type QueryTracker interface {
 
 // EngineOpts contains configuration options used when creating a new Engine.
 type EngineOpts struct {
-	Logger             log.Logger
+	Logger             *slog.Logger
 	Reg                prometheus.Registerer
 	MaxSamples         int
 	Timeout            time.Duration
@@ -326,7 +330,7 @@ type EngineOpts struct {
 // Engine handles the lifetime of queries from beginning to end.
 // It is connected to a querier.
 type Engine struct {
-	logger                   log.Logger
+	logger                   *slog.Logger
 	metrics                  *engineMetrics
 	timeout                  time.Duration
 	maxSamplesPerQuery       int
@@ -344,7 +348,7 @@ type Engine struct {
 // NewEngine returns a new engine.
 func NewEngine(opts EngineOpts) *Engine {
 	if opts.Logger == nil {
-		opts.Logger = log.NewNopLogger()
+		opts.Logger = promslog.NewNopLogger()
 	}
 
 	queryResultSummary := prometheus.NewSummaryVec(prometheus.SummaryOpts{
@@ -403,7 +407,7 @@ func NewEngine(opts EngineOpts) *Engine {
 	if opts.LookbackDelta == 0 {
 		opts.LookbackDelta = defaultLookbackDelta
 		if l := opts.Logger; l != nil {
-			level.Debug(l).Log("msg", "Lookback delta is zero, setting to default value", "value", defaultLookbackDelta)
+			l.Debug("Lookback delta is zero, setting to default value", "value", defaultLookbackDelta)
 		}
 	}
 
@@ -435,6 +439,10 @@ func NewEngine(opts EngineOpts) *Engine {
 
 // Close closes ng.
 func (ng *Engine) Close() error {
+	if ng == nil {
+		return nil
+	}
+
 	if ng.activeQueryTracker != nil {
 		return ng.activeQueryTracker.Close()
 	}
@@ -451,7 +459,7 @@ func (ng *Engine) SetQueryLogger(l QueryLogger) {
 		// not make reload fail; only log a warning.
 		err := ng.queryLogger.Close()
 		if err != nil {
-			level.Warn(ng.logger).Log("msg", "Error while closing the previous query log file", "err", err)
+			ng.logger.Warn("Error while closing the previous query log file", "err", err)
 		}
 	}
 
@@ -628,23 +636,23 @@ func (ng *Engine) exec(ctx context.Context, q *query) (v parser.Value, ws annota
 				// The step provided by the user is in seconds.
 				params["step"] = int64(eq.Interval / (time.Second / time.Nanosecond))
 			}
-			f := []interface{}{"params", params}
+			l.With("params", params)
 			if err != nil {
-				f = append(f, "error", err)
+				l.With("error", err)
 			}
-			f = append(f, "stats", stats.NewQueryStats(q.Stats()))
+			l.With("stats", stats.NewQueryStats(q.Stats()))
 			if span := trace.SpanFromContext(ctx); span != nil {
-				f = append(f, "spanID", span.SpanContext().SpanID())
+				l.With("spanID", span.SpanContext().SpanID())
 			}
 			if origin := ctx.Value(QueryOrigin{}); origin != nil {
 				for k, v := range origin.(map[string]interface{}) {
-					f = append(f, k, v)
+					l.With(k, v)
 				}
 			}
-			if err := l.Log(f...); err != nil {
-				ng.metrics.queryLogFailures.Inc()
-				level.Error(ng.logger).Log("msg", "can't log query", "err", err)
-			}
+			l.Info("promql query logged")
+			// TODO: @tjhop -- do we still need this metric/error log if logger doesn't return errors?
+			// ng.metrics.queryLogFailures.Inc()
+			// ng.logger.Error("can't log query", "err", err)
 		}
 		ng.queryLoggerLock.RUnlock()
 	}()
@@ -905,11 +913,17 @@ func getTimeRangesForSelector(s *parser.EvalStmt, n *parser.VectorSelector, path
 	}
 
 	if evalRange == 0 {
-		start -= durationMilliseconds(s.LookbackDelta)
+		// Reduce the start by one fewer ms than the lookback delta
+		// because wo want to exclude samples that are precisely the
+		// lookback delta before the eval time.
+		start -= durationMilliseconds(s.LookbackDelta) - 1
 	} else {
-		// For all matrix queries we want to ensure that we have (end-start) + range selected
-		// this way we have `range` data before the start time
-		start -= durationMilliseconds(evalRange)
+		// For all matrix queries we want to ensure that we have
+		// (end-start) + range selected this way we have `range` data
+		// before the start time. We subtract one from the range to
+		// exclude samples positioned directly at the lower boundary of
+		// the range.
+		start -= durationMilliseconds(evalRange) - 1
 	}
 
 	offsetMilliseconds := durationMilliseconds(n.OriginalOffset)
@@ -994,6 +1008,8 @@ func extractGroupsFromPath(p []parser.Node) (bool, []string) {
 	return false, nil
 }
 
+// checkAndExpandSeriesSet expands expr's UnexpandedSeriesSet into expr's Series.
+// If the Series field is already non-nil, it's a no-op.
 func checkAndExpandSeriesSet(ctx context.Context, expr parser.Expr) (annotations.Annotations, error) {
 	switch e := expr.(type) {
 	case *parser.MatrixSelector:
@@ -1047,7 +1063,7 @@ type evaluator struct {
 
 	maxSamples               int
 	currentSamples           int
-	logger                   log.Logger
+	logger                   *slog.Logger
 	lookbackDelta            time.Duration
 	samplesStats             *stats.QuerySamples
 	noStepSubqueryIntervalFn func(rangeMillis int64) int64
@@ -1077,7 +1093,7 @@ func (ev *evaluator) recover(expr parser.Expr, ws *annotations.Annotations, errp
 		buf := make([]byte, 64<<10)
 		buf = buf[:runtime.Stack(buf, false)]
 
-		level.Error(ev.logger).Log("msg", "runtime panic during query evaluation", "expr", expr.String(), "err", e, "stacktrace", string(buf))
+		ev.logger.Error("runtime panic during query evaluation", "expr", expr.String(), "err", e, "stacktrace", string(buf))
 		*errp = fmt.Errorf("unexpected error: %w", err)
 	case errWithWarnings:
 		*errp = err.err
@@ -1445,6 +1461,70 @@ func (ev *evaluator) rangeEvalAgg(ctx context.Context, aggExpr *parser.Aggregate
 	return result, warnings
 }
 
+// evalVectorSelector generates a Matrix between ev.startTimestamp and ev.endTimestamp (inclusive), each point spaced ev.interval apart, from vs.
+// vs.Series has to be expanded before calling this method.
+// For every series iterator in vs.Series, the method iterates in ev.interval sized steps from ev.startTimestamp until and including ev.endTimestamp,
+// collecting every corresponding sample (obtained via ev.vectorSelectorSingle) into a Series.
+// All of the generated Series are collected into a Matrix, that gets returned.
+func (ev *evaluator) evalVectorSelector(ctx context.Context, vs *parser.VectorSelector) Matrix {
+	numSteps := int((ev.endTimestamp-ev.startTimestamp)/ev.interval) + 1
+
+	mat := make(Matrix, 0, len(vs.Series))
+	var prevSS *Series
+	it := storage.NewMemoizedEmptyIterator(durationMilliseconds(ev.lookbackDelta))
+	var chkIter chunkenc.Iterator
+	for _, s := range vs.Series {
+		if err := contextDone(ctx, "expression evaluation"); err != nil {
+			ev.error(err)
+		}
+
+		chkIter = s.Iterator(chkIter)
+		it.Reset(chkIter)
+		ss := Series{
+			Metric: s.Labels(),
+		}
+
+		for ts, step := ev.startTimestamp, -1; ts <= ev.endTimestamp; ts += ev.interval {
+			step++
+			_, f, h, ok := ev.vectorSelectorSingle(it, vs, ts)
+			if !ok {
+				continue
+			}
+
+			if h == nil {
+				ev.currentSamples++
+				ev.samplesStats.IncrementSamplesAtStep(step, 1)
+				if ev.currentSamples > ev.maxSamples {
+					ev.error(ErrTooManySamples(env))
+				}
+				if ss.Floats == nil {
+					ss.Floats = reuseOrGetFPointSlices(prevSS, numSteps)
+				}
+				ss.Floats = append(ss.Floats, FPoint{F: f, T: ts})
+			} else {
+				point := HPoint{H: h, T: ts}
+				histSize := point.size()
+				ev.currentSamples += histSize
+				ev.samplesStats.IncrementSamplesAtStep(step, int64(histSize))
+				if ev.currentSamples > ev.maxSamples {
+					ev.error(ErrTooManySamples(env))
+				}
+				if ss.Histograms == nil {
+					ss.Histograms = reuseOrGetHPointSlices(prevSS, numSteps)
+				}
+				ss.Histograms = append(ss.Histograms, point)
+			}
+		}
+
+		if len(ss.Floats)+len(ss.Histograms) > 0 {
+			mat = append(mat, ss)
+			prevSS = &mat[len(mat)-1]
+		}
+	}
+	ev.samplesStats.UpdatePeak(ev.currentSamples)
+	return mat
+}
+
 // evalSubquery evaluates given SubqueryExpr and returns an equivalent
 // evaluated MatrixSelector in its place. Note that the Name and LabelMatchers are not set.
 func (ev *evaluator) evalSubquery(ctx context.Context, subq *parser.SubqueryExpr) (*parser.MatrixSelector, int, annotations.Annotations) {
@@ -1732,9 +1812,8 @@ func (ev *evaluator) eval(ctx context.Context, expr parser.Expr) (parser.Value, 
 			ev.samplesStats.UpdatePeak(ev.currentSamples)
 
 			if e.Func.Name == "rate" || e.Func.Name == "increase" {
-				samples := inMatrix[0]
-				metricName := samples.Metric.Get(labels.MetricName)
-				if metricName != "" && len(samples.Floats) > 0 &&
+				metricName := inMatrix[0].Metric.Get(labels.MetricName)
+				if metricName != "" && len(ss.Floats) > 0 &&
 					!strings.HasSuffix(metricName, "_total") &&
 					!strings.HasSuffix(metricName, "_sum") &&
 					!strings.HasSuffix(metricName, "_count") &&
@@ -1811,6 +1890,9 @@ func (ev *evaluator) eval(ctx context.Context, expr parser.Expr) (parser.Value, 
 				for j := range mat[i].Floats {
 					mat[i].Floats[j].F = -mat[i].Floats[j].F
 				}
+				for j := range mat[i].Histograms {
+					mat[i].Histograms[j].H = mat[i].Histograms[j].H.Copy().Mul(-1)
+				}
 			}
 			if !ev.enableDelayedNameRemoval && mat.ContainsSameLabelset() {
 				ev.errorf("vector cannot contain metrics with the same labelset")
@@ -1880,56 +1962,7 @@ func (ev *evaluator) eval(ctx context.Context, expr parser.Expr) (parser.Value, 
 		if err != nil {
 			ev.error(errWithWarnings{fmt.Errorf("expanding series: %w", err), ws})
 		}
-		mat := make(Matrix, 0, len(e.Series))
-		var prevSS *Series
-		it := storage.NewMemoizedEmptyIterator(durationMilliseconds(ev.lookbackDelta))
-		var chkIter chunkenc.Iterator
-		for i, s := range e.Series {
-			if err := contextDone(ctx, "expression evaluation"); err != nil {
-				ev.error(err)
-			}
-			chkIter = s.Iterator(chkIter)
-			it.Reset(chkIter)
-			ss := Series{
-				Metric: e.Series[i].Labels(),
-			}
-
-			for ts, step := ev.startTimestamp, -1; ts <= ev.endTimestamp; ts += ev.interval {
-				step++
-				_, f, h, ok := ev.vectorSelectorSingle(it, e, ts)
-				if ok {
-					if h == nil {
-						ev.currentSamples++
-						ev.samplesStats.IncrementSamplesAtStep(step, 1)
-						if ev.currentSamples > ev.maxSamples {
-							ev.error(ErrTooManySamples(env))
-						}
-						if ss.Floats == nil {
-							ss.Floats = reuseOrGetFPointSlices(prevSS, numSteps)
-						}
-						ss.Floats = append(ss.Floats, FPoint{F: f, T: ts})
-					} else {
-						point := HPoint{H: h, T: ts}
-						histSize := point.size()
-						ev.currentSamples += histSize
-						ev.samplesStats.IncrementSamplesAtStep(step, int64(histSize))
-						if ev.currentSamples > ev.maxSamples {
-							ev.error(ErrTooManySamples(env))
-						}
-						if ss.Histograms == nil {
-							ss.Histograms = reuseOrGetHPointSlices(prevSS, numSteps)
-						}
-						ss.Histograms = append(ss.Histograms, point)
-					}
-				}
-			}
-
-			if len(ss.Floats)+len(ss.Histograms) > 0 {
-				mat = append(mat, ss)
-				prevSS = &mat[len(mat)-1]
-			}
-		}
-		ev.samplesStats.UpdatePeak(ev.currentSamples)
+		mat := ev.evalVectorSelector(ctx, e)
 		return mat, ws
 
 	case *parser.MatrixSelector:
@@ -2080,7 +2113,7 @@ func (ev *evaluator) rangeEvalTimestampFunctionOverVectorSelector(ctx context.Co
 	seriesIterators := make([]*storage.MemoizedSeriesIterator, len(vs.Series))
 	for i, s := range vs.Series {
 		it := s.Iterator(nil)
-		seriesIterators[i] = storage.NewMemoizedIterator(it, durationMilliseconds(ev.lookbackDelta))
+		seriesIterators[i] = storage.NewMemoizedIterator(it, durationMilliseconds(ev.lookbackDelta)-1)
 	}
 
 	return ev.rangeEval(ctx, nil, func(v []parser.Value, _ [][]EvalSeriesHelper, enh *EvalNodeHelper) (Vector, annotations.Annotations) {
@@ -2142,7 +2175,7 @@ func (ev *evaluator) vectorSelectorSingle(it *storage.MemoizedSeriesIterator, no
 	if valueType == chunkenc.ValNone || t > refTime {
 		var ok bool
 		t, v, h, ok = it.PeekPrev()
-		if !ok || t < refTime-durationMilliseconds(ev.lookbackDelta) {
+		if !ok || t <= refTime-durationMilliseconds(ev.lookbackDelta) {
 			return 0, 0, nil, false
 		}
 	}
@@ -2276,20 +2309,20 @@ func (ev *evaluator) matrixIterSlice(
 	mintFloats, mintHistograms := mint, mint
 
 	// First floats...
-	if len(floats) > 0 && floats[len(floats)-1].T >= mint {
+	if len(floats) > 0 && floats[len(floats)-1].T > mint {
 		// There is an overlap between previous and current ranges, retain common
 		// points. In most such cases:
 		//   (a) the overlap is significantly larger than the eval step; and/or
 		//   (b) the number of samples is relatively small.
 		// so a linear search will be as fast as a binary search.
 		var drop int
-		for drop = 0; floats[drop].T < mint; drop++ {
+		for drop = 0; floats[drop].T <= mint; drop++ {
 		}
 		ev.currentSamples -= drop
 		copy(floats, floats[drop:])
 		floats = floats[:len(floats)-drop]
 		// Only append points with timestamps after the last timestamp we have.
-		mintFloats = floats[len(floats)-1].T + 1
+		mintFloats = floats[len(floats)-1].T
 	} else {
 		ev.currentSamples -= len(floats)
 		if floats != nil {
@@ -2298,14 +2331,14 @@ func (ev *evaluator) matrixIterSlice(
 	}
 
 	// ...then the same for histograms. TODO(beorn7): Use generics?
-	if len(histograms) > 0 && histograms[len(histograms)-1].T >= mint {
+	if len(histograms) > 0 && histograms[len(histograms)-1].T > mint {
 		// There is an overlap between previous and current ranges, retain common
 		// points. In most such cases:
 		//   (a) the overlap is significantly larger than the eval step; and/or
 		//   (b) the number of samples is relatively small.
 		// so a linear search will be as fast as a binary search.
 		var drop int
-		for drop = 0; histograms[drop].T < mint; drop++ {
+		for drop = 0; histograms[drop].T <= mint; drop++ {
 		}
 		// Rotate the buffer around the drop index so that points before mint can be
 		// reused to store new histograms.
@@ -2316,7 +2349,7 @@ func (ev *evaluator) matrixIterSlice(
 		histograms = histograms[:len(histograms)-drop]
 		ev.currentSamples -= totalHPointSize(histograms)
 		// Only append points with timestamps after the last timestamp we have.
-		mintHistograms = histograms[len(histograms)-1].T + 1
+		mintHistograms = histograms[len(histograms)-1].T
 	} else {
 		ev.currentSamples -= totalHPointSize(histograms)
 		if histograms != nil {
@@ -2340,7 +2373,7 @@ loop:
 		case chunkenc.ValFloatHistogram, chunkenc.ValHistogram:
 			t := buf.AtT()
 			// Values in the buffer are guaranteed to be smaller than maxt.
-			if t >= mintHistograms {
+			if t > mintHistograms {
 				if histograms == nil {
 					histograms = getMatrixSelectorHPoints()
 				}
@@ -2366,7 +2399,7 @@ loop:
 				continue loop
 			}
 			// Values in the buffer are guaranteed to be smaller than maxt.
-			if t >= mintFloats {
+			if t > mintFloats {
 				ev.currentSamples++
 				if ev.currentSamples > ev.maxSamples {
 					ev.error(ErrTooManySamples(env))

@@ -31,14 +31,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-kit/log"
 	"github.com/gogo/protobuf/proto"
 	"github.com/google/go-cmp/cmp"
+	"github.com/grafana/regexp"
 	"github.com/prometheus/client_golang/prometheus"
 	prom_testutil "github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	config_util "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/common/promslog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/prometheus/config"
@@ -53,6 +54,7 @@ import (
 	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
+	"github.com/prometheus/prometheus/util/logging"
 	"github.com/prometheus/prometheus/util/pool"
 	"github.com/prometheus/prometheus/util/teststorage"
 	"github.com/prometheus/prometheus/util/testutil"
@@ -158,7 +160,7 @@ type testLoop struct {
 	timeout      time.Duration
 }
 
-func (l *testLoop) setScrapeFailureLogger(log.Logger) {
+func (l *testLoop) setScrapeFailureLogger(*logging.JSONFileLogger) {
 }
 
 func (l *testLoop) run(errc chan<- error) {
@@ -395,7 +397,7 @@ func TestScrapePoolTargetLimit(t *testing.T) {
 		activeTargets: map[uint64]*Target{},
 		loops:         map[uint64]loop{},
 		newLoop:       newLoop,
-		logger:        log.NewNopLogger(),
+		logger:        promslog.NewNopLogger(),
 		client:        http.DefaultClient,
 		metrics:       newTestScrapeMetrics(t),
 		symbolTable:   labels.NewSymbolTable(),
@@ -440,7 +442,7 @@ func TestScrapePoolTargetLimit(t *testing.T) {
 			lerr := l.(*testLoop).getForcedError()
 			if shouldErr {
 				require.Error(t, lerr, "error was expected for %d targets with a limit of %d", targets, limit)
-				require.Equal(t, fmt.Sprintf("target_limit exceeded (number of targets: %d, limit: %d)", targets, limit), lerr.Error())
+				require.EqualError(t, lerr, fmt.Sprintf("target_limit exceeded (number of targets: %d, limit: %d)", targets, limit))
 			} else {
 				require.NoError(t, lerr)
 			}
@@ -1043,6 +1045,7 @@ func TestScrapeLoopSeriesAdded(t *testing.T) {
 }
 
 func TestScrapeLoopFailWithInvalidLabelsAfterRelabel(t *testing.T) {
+	model.NameValidationScheme = model.LegacyValidation
 	s := teststorage.New(t)
 	defer s.Close()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1523,7 +1526,7 @@ func TestScrapeLoopAppendCacheEntryButErrNotFound(t *testing.T) {
 	fakeRef := storage.SeriesRef(1)
 	expValue := float64(1)
 	metric := []byte(`metric{n="1"} 1`)
-	p, warning := textparse.New(metric, "", false, labels.NewSymbolTable())
+	p, warning := textparse.New(metric, "", false, false, labels.NewSymbolTable())
 	require.NoError(t, warning)
 
 	var lset labels.Labels
@@ -1997,7 +2000,8 @@ metric: <
 `,
 			contentType: "application/vnd.google.protobuf",
 			histograms: []histogramSample{{
-				t: 1234568,
+				t:      1234568,
+				metric: labels.FromStrings("__name__", "test_histogram"),
 				h: &histogram.Histogram{
 					Count:         175,
 					ZeroCount:     2,
@@ -2123,7 +2127,8 @@ metric: <
 				{metric: labels.FromStrings("__name__", "test_histogram_bucket", "le", "+Inf"), t: 1234568, f: 175},
 			},
 			histograms: []histogramSample{{
-				t: 1234568,
+				t:      1234568,
+				metric: labels.FromStrings("__name__", "test_histogram"),
 				h: &histogram.Histogram{
 					Count:         175,
 					ZeroCount:     2,
@@ -2379,8 +2384,11 @@ func TestTargetScraperScrapeOK(t *testing.T) {
 		expectedTimeout = "1.5"
 	)
 
-	var protobufParsing bool
-	var allowUTF8 bool
+	var (
+		protobufParsing bool
+		allowUTF8       bool
+		qValuePattern   = regexp.MustCompile(`q=([0-9]+(\.\d+)?)`)
+	)
 
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2391,6 +2399,17 @@ func TestTargetScraperScrapeOK(t *testing.T) {
 			if protobufParsing {
 				require.True(t, strings.HasPrefix(accept, "application/vnd.google.protobuf;"),
 					"Expected Accept header to prefer application/vnd.google.protobuf.")
+			}
+
+			contentTypes := strings.Split(accept, ",")
+			for _, ct := range contentTypes {
+				match := qValuePattern.FindStringSubmatch(ct)
+				require.Len(t, match, 3)
+				qValue, err := strconv.ParseFloat(match[1], 64)
+				require.NoError(t, err, "Error parsing q value")
+				require.GreaterOrEqual(t, qValue, float64(0))
+				require.LessOrEqual(t, qValue, float64(1))
+				require.LessOrEqual(t, len(strings.Split(match[1], ".")[1]), 3, "q value should have at most 3 decimal places")
 			}
 
 			timeout := r.Header.Get("X-Prometheus-Scrape-Timeout-Seconds")
@@ -2531,7 +2550,7 @@ func TestTargetScrapeScrapeNotFound(t *testing.T) {
 	resp, err := ts.scrape(context.Background())
 	require.NoError(t, err)
 	_, err = ts.readResponse(context.Background(), resp, io.Discard)
-	require.Contains(t, err.Error(), "404", "Expected \"404 NotFound\" error but got: %s", err)
+	require.ErrorContains(t, err, "404", "Expected \"404 NotFound\" error but got: %s", err)
 }
 
 func TestTargetScraperBodySizeLimit(t *testing.T) {
@@ -3043,7 +3062,7 @@ func TestReuseCacheRace(t *testing.T) {
 
 func TestCheckAddError(t *testing.T) {
 	var appErrs appendErrors
-	sl := scrapeLoop{l: log.NewNopLogger(), metrics: newTestScrapeMetrics(t)}
+	sl := scrapeLoop{l: promslog.NewNopLogger(), metrics: newTestScrapeMetrics(t)}
 	sl.checkAddError(nil, storage.ErrOutOfOrderSample, nil, nil, &appErrs)
 	require.Equal(t, 1, appErrs.numOutOfOrder)
 }
@@ -3114,18 +3133,7 @@ func TestScrapeReportLimit(t *testing.T) {
 		ScrapeTimeout:  model.Duration(100 * time.Millisecond),
 	}
 
-	var (
-		scrapes      int
-		scrapedTwice = make(chan bool)
-	)
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "metric_a 44\nmetric_b 44\nmetric_c 44\nmetric_d 44\n")
-		scrapes++
-		if scrapes == 2 {
-			close(scrapedTwice)
-		}
-	}))
+	ts, scrapedTwice := newScrapableServer("metric_a 44\nmetric_b 44\nmetric_c 44\nmetric_d 44\n")
 	defer ts.Close()
 
 	sp, err := newScrapePool(cfg, s, 0, nil, nil, &Options{}, newTestScrapeMetrics(t))
@@ -3166,6 +3174,52 @@ func TestScrapeReportLimit(t *testing.T) {
 	}
 
 	require.True(t, found)
+}
+
+func TestScrapeUTF8(t *testing.T) {
+	s := teststorage.New(t)
+	defer s.Close()
+	model.NameValidationScheme = model.UTF8Validation
+	t.Cleanup(func() { model.NameValidationScheme = model.LegacyValidation })
+
+	cfg := &config.ScrapeConfig{
+		JobName:                    "test",
+		Scheme:                     "http",
+		ScrapeInterval:             model.Duration(100 * time.Millisecond),
+		ScrapeTimeout:              model.Duration(100 * time.Millisecond),
+		MetricNameValidationScheme: config.UTF8ValidationConfig,
+	}
+	ts, scrapedTwice := newScrapableServer("{\"with.dots\"} 42\n")
+	defer ts.Close()
+
+	sp, err := newScrapePool(cfg, s, 0, nil, nil, &Options{}, newTestScrapeMetrics(t))
+	require.NoError(t, err)
+	defer sp.stop()
+
+	testURL, err := url.Parse(ts.URL)
+	require.NoError(t, err)
+	sp.Sync([]*targetgroup.Group{
+		{
+			Targets: []model.LabelSet{{model.AddressLabel: model.LabelValue(testURL.Host)}},
+		},
+	})
+
+	select {
+	case <-time.After(5 * time.Second):
+		t.Fatalf("target was not scraped twice")
+	case <-scrapedTwice:
+		// If the target has been scraped twice, report samples from the first
+		// scrape have been inserted in the database.
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q, err := s.Querier(time.Time{}.UnixNano(), time.Now().UnixNano())
+	require.NoError(t, err)
+	defer q.Close()
+	series := q.Select(ctx, false, nil, labels.MustNewMatcher(labels.MatchRegexp, "__name__", "with.dots"))
+
+	require.True(t, series.Next(), "series not found in tsdb")
 }
 
 func TestScrapeLoopLabelLimit(t *testing.T) {
@@ -3364,16 +3418,7 @@ test_summary_count 199
 	// The expected "quantile" values do not have the trailing ".0".
 	expectedQuantileValues := []string{"0.5", "0.9", "0.95", "0.99", "1"}
 
-	scrapeCount := 0
-	scraped := make(chan bool)
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, metricsText)
-		scrapeCount++
-		if scrapeCount > 2 {
-			close(scraped)
-		}
-	}))
+	ts, scrapedTwice := newScrapableServer(metricsText)
 	defer ts.Close()
 
 	sp, err := newScrapePool(config, simpleStorage, 0, nil, nil, &Options{}, newTestScrapeMetrics(t))
@@ -3392,7 +3437,7 @@ test_summary_count 199
 	select {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("target was not scraped")
-	case <-scraped:
+	case <-scrapedTwice:
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -3729,7 +3774,9 @@ func TestNativeHistogramMaxSchemaSet(t *testing.T) {
 		},
 	}
 	for name, tc := range testcases {
+		tc := tc
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			testNativeHistogramMaxSchemaSet(t, tc.minBucketFactor, tc.expectedSchema)
 		})
 	}
@@ -3771,8 +3818,9 @@ func testNativeHistogramMaxSchemaSet(t *testing.T, minBucketFactor string, expec
 	// Create a scrape loop with the HTTP server as the target.
 	configStr := fmt.Sprintf(`
 global:
-  scrape_interval: 1s
-  scrape_timeout: 1s
+  metric_name_validation_scheme: legacy
+  scrape_interval: 50ms
+  scrape_timeout: 25ms
 scrape_configs:
   - job_name: test
     %s
@@ -3785,9 +3833,9 @@ scrape_configs:
 	s.DB.EnableNativeHistograms()
 	reg := prometheus.NewRegistry()
 
-	mng, err := NewManager(&Options{EnableNativeHistogramsIngestion: true}, nil, nil, s, reg)
+	mng, err := NewManager(&Options{DiscoveryReloadInterval: model.Duration(10 * time.Millisecond), EnableNativeHistogramsIngestion: true}, nil, nil, s, reg)
 	require.NoError(t, err)
-	cfg, err := config.Load(configStr, false, log.NewNopLogger())
+	cfg, err := config.Load(configStr, false, promslog.NewNopLogger())
 	require.NoError(t, err)
 	mng.ApplyConfig(cfg)
 	tsets := make(chan map[string][]*targetgroup.Group)
@@ -3816,7 +3864,7 @@ scrape_configs:
 			countSeries++
 		}
 		return countSeries > 0
-	}, 15*time.Second, 100*time.Millisecond)
+	}, 5*time.Second, 100*time.Millisecond)
 
 	// Check that native histogram schema is as expected.
 	q, err := s.Querier(0, math.MaxInt64)
@@ -3840,4 +3888,175 @@ scrape_configs:
 	for _, h := range histogramSamples {
 		require.Equal(t, expectedSchema, h.Schema)
 	}
+}
+
+func TestTargetScrapeConfigWithLabels(t *testing.T) {
+	const (
+		configTimeout        = 1500 * time.Millisecond
+		expectedTimeout      = "1.5"
+		expectedTimeoutLabel = "1s500ms"
+		secondTimeout        = 500 * time.Millisecond
+		secondTimeoutLabel   = "500ms"
+		expectedParam        = "value1"
+		secondParam          = "value2"
+		expectedPath         = "/metric-ok"
+		secondPath           = "/metric-nok"
+		httpScheme           = "http"
+		paramLabel           = "__param_param"
+		jobName              = "test"
+	)
+
+	createTestServer := func(t *testing.T, done chan struct{}) *url.URL {
+		server := httptest.NewServer(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(done)
+				require.Equal(t, expectedTimeout, r.Header.Get("X-Prometheus-Scrape-Timeout-Seconds"))
+				require.Equal(t, expectedParam, r.URL.Query().Get("param"))
+				require.Equal(t, expectedPath, r.URL.Path)
+
+				w.Header().Set("Content-Type", `text/plain; version=0.0.4`)
+				w.Write([]byte("metric_a 1\nmetric_b 2\n"))
+			}),
+		)
+		t.Cleanup(server.Close)
+		serverURL, err := url.Parse(server.URL)
+		require.NoError(t, err)
+		return serverURL
+	}
+
+	run := func(t *testing.T, cfg *config.ScrapeConfig, targets []*targetgroup.Group) chan struct{} {
+		done := make(chan struct{})
+		srvURL := createTestServer(t, done)
+
+		// Update target addresses to use the dynamically created server URL.
+		for _, target := range targets {
+			for i := range target.Targets {
+				target.Targets[i][model.AddressLabel] = model.LabelValue(srvURL.Host)
+			}
+		}
+
+		sp, err := newScrapePool(cfg, &nopAppendable{}, 0, nil, nil, &Options{}, newTestScrapeMetrics(t))
+		require.NoError(t, err)
+		t.Cleanup(sp.stop)
+
+		sp.Sync(targets)
+		return done
+	}
+
+	cases := []struct {
+		name    string
+		cfg     *config.ScrapeConfig
+		targets []*targetgroup.Group
+	}{
+		{
+			name: "Everything in scrape config",
+			cfg: &config.ScrapeConfig{
+				ScrapeInterval: model.Duration(2 * time.Second),
+				ScrapeTimeout:  model.Duration(configTimeout),
+				Params:         url.Values{"param": []string{expectedParam}},
+				JobName:        jobName,
+				Scheme:         httpScheme,
+				MetricsPath:    expectedPath,
+			},
+			targets: []*targetgroup.Group{
+				{
+					Targets: []model.LabelSet{
+						{model.AddressLabel: model.LabelValue("")},
+					},
+				},
+			},
+		},
+		{
+			name: "Overridden in target",
+			cfg: &config.ScrapeConfig{
+				ScrapeInterval: model.Duration(2 * time.Second),
+				ScrapeTimeout:  model.Duration(secondTimeout),
+				JobName:        jobName,
+				Scheme:         httpScheme,
+				MetricsPath:    secondPath,
+				Params:         url.Values{"param": []string{secondParam}},
+			},
+			targets: []*targetgroup.Group{
+				{
+					Targets: []model.LabelSet{
+						{
+							model.AddressLabel:       model.LabelValue(""),
+							model.ScrapeTimeoutLabel: expectedTimeoutLabel,
+							model.MetricsPathLabel:   expectedPath,
+							paramLabel:               expectedParam,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "Overridden in relabel_config",
+			cfg: &config.ScrapeConfig{
+				ScrapeInterval: model.Duration(2 * time.Second),
+				ScrapeTimeout:  model.Duration(secondTimeout),
+				JobName:        jobName,
+				Scheme:         httpScheme,
+				MetricsPath:    secondPath,
+				Params:         url.Values{"param": []string{secondParam}},
+				RelabelConfigs: []*relabel.Config{
+					{
+						Action:       relabel.DefaultRelabelConfig.Action,
+						Regex:        relabel.DefaultRelabelConfig.Regex,
+						SourceLabels: relabel.DefaultRelabelConfig.SourceLabels,
+						TargetLabel:  model.ScrapeTimeoutLabel,
+						Replacement:  expectedTimeoutLabel,
+					},
+					{
+						Action:       relabel.DefaultRelabelConfig.Action,
+						Regex:        relabel.DefaultRelabelConfig.Regex,
+						SourceLabels: relabel.DefaultRelabelConfig.SourceLabels,
+						TargetLabel:  paramLabel,
+						Replacement:  expectedParam,
+					},
+					{
+						Action:       relabel.DefaultRelabelConfig.Action,
+						Regex:        relabel.DefaultRelabelConfig.Regex,
+						SourceLabels: relabel.DefaultRelabelConfig.SourceLabels,
+						TargetLabel:  model.MetricsPathLabel,
+						Replacement:  expectedPath,
+					},
+				},
+			},
+			targets: []*targetgroup.Group{
+				{
+					Targets: []model.LabelSet{
+						{
+							model.AddressLabel:       model.LabelValue(""),
+							model.ScrapeTimeoutLabel: secondTimeoutLabel,
+							model.MetricsPathLabel:   secondPath,
+							paramLabel:               secondParam,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			select {
+			case <-run(t, c.cfg, c.targets):
+			case <-time.After(10 * time.Second):
+				t.Fatal("timeout after 10 seconds")
+			}
+		})
+	}
+}
+
+func newScrapableServer(scrapeText string) (s *httptest.Server, scrapedTwice chan bool) {
+	var scrapes int
+	scrapedTwice = make(chan bool)
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, scrapeText)
+		scrapes++
+		if scrapes == 2 {
+			close(scrapedTwice)
+		}
+	})), scrapedTwice
 }

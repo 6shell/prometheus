@@ -71,8 +71,11 @@ global:
   # How frequently to evaluate rules.
   [ evaluation_interval: <duration> | default = 1m ]
 
-  # Offset the rule evaluation timestamp of this particular group by the specified duration into the past to ensure the underlying metrics have been received.
-  # Metric availability delays are more likely to occur when Prometheus is running as a remote write target, but can also occur when there's anomalies with scraping.
+  # Offset the rule evaluation timestamp of this particular group by the
+  # specified duration into the past to ensure the underlying metrics have
+  # been received. Metric availability delays are more likely to occur when
+  # Prometheus is running as a remote write target, but can also occur when
+  # there's anomalies with scraping.
   [ rule_query_offset: <duration> | default = 0s ]
 
   # The labels to add to any time series or alerts when communicating with
@@ -94,27 +97,29 @@ global:
   # change or be removed in the future.
   [ body_size_limit: <size> | default = 0 ]
 
-  # Per-scrape limit on number of scraped samples that will be accepted.
+  # Per-scrape limit on the number of scraped samples that will be accepted.
   # If more than this number of samples are present after metric relabeling
   # the entire scrape will be treated as failed. 0 means no limit.
   [ sample_limit: <int> | default = 0 ]
 
-  # Per-scrape limit on number of labels that will be accepted for a sample. If
-  # more than this number of labels are present post metric-relabeling, the
-  # entire scrape will be treated as failed. 0 means no limit.
+  # Limit on the number of labels that will be accepted per sample. If more
+  # than this number of labels are present on any sample post metric-relabeling,
+  # the entire scrape will be treated as failed. 0 means no limit.
   [ label_limit: <int> | default = 0 ]
 
-  # Per-scrape limit on length of labels name that will be accepted for a sample.
-  # If a label name is longer than this number post metric-relabeling, the entire
-  # scrape will be treated as failed. 0 means no limit.
+  # Limit on the length (in bytes) of each individual label name. If any label
+  # name in a scrape is longer than this number post metric-relabeling, the
+  # entire scrape will be treated as failed. Note that label names are UTF-8
+  # encoded, and characters can take up to 4 bytes. 0 means no limit.
   [ label_name_length_limit: <int> | default = 0 ]
 
-  # Per-scrape limit on length of labels value that will be accepted for a sample.
-  # If a label value is longer than this number post metric-relabeling, the
-  # entire scrape will be treated as failed. 0 means no limit.
+  # Limit on the length (in bytes) of each individual label value. If any label
+  # value in a scrape is longer than this number post metric-relabeling, the
+  # entire scrape will be treated as failed. Note that label values are UTF-8
+  # encoded, and characters can take up to 4 bytes. 0 means no limit.
   [ label_value_length_limit: <int> | default = 0 ]
 
-  # Per-scrape config limit on number of unique targets that will be
+  # Limit per scrape config on number of unique targets that will be
   # accepted. If more than this number of targets are present after target
   # relabeling, Prometheus will mark the targets as failed without scraping them.
   # 0 means no limit. This is an experimental feature, this behaviour could
@@ -126,9 +131,9 @@ global:
   [ keep_dropped_targets: <int> | default = 0 ]
 
   # Specifies the validation scheme for metric and label names. Either blank or
-  # "legacy" for letters, numbers, colons, and underscores; or "utf8" for full
-  # UTF-8 support.
-  [ metric_name_validation_scheme <string> | default "legacy" ]
+  # "utf8" for for full UTF-8 support, or "legacy" for letters, numbers, colons,
+  # and underscores.
+  [ metric_name_validation_scheme <string> | default "utf8" ]
 
 runtime:
   # Configure the Go garbage collector GOGC parameter
@@ -266,9 +271,11 @@ params:
 
 # Sets the `Authorization` header on every scrape request with the
 # configured username and password.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -454,41 +461,43 @@ metric_relabel_configs:
 # change or be removed in the future.
 [ body_size_limit: <size> | default = 0 ]
 
-# Per-scrape limit on number of scraped samples that will be accepted.
+# Per-scrape limit on the number of scraped samples that will be accepted.
 # If more than this number of samples are present after metric relabeling
 # the entire scrape will be treated as failed. 0 means no limit.
 [ sample_limit: <int> | default = 0 ]
 
-# Per-scrape limit on number of labels that will be accepted for a sample. If
-# more than this number of labels are present post metric-relabeling, the
-# entire scrape will be treated as failed. 0 means no limit.
+# Limit on the number of labels that will be accepted per sample. If more
+# than this number of labels are present on any sample post metric-relabeling,
+# the entire scrape will be treated as failed. 0 means no limit.
 [ label_limit: <int> | default = 0 ]
 
-# Per-scrape limit on length of labels name that will be accepted for a sample.
-# If a label name is longer than this number post metric-relabeling, the entire
-# scrape will be treated as failed. 0 means no limit.
+# Limit on the length (in bytes) of each individual label name. If any label
+# name in a scrape is longer than this number post metric-relabeling, the
+# entire scrape will be treated as failed. Note that label names are UTF-8
+# encoded, and characters can take up to 4 bytes. 0 means no limit.
 [ label_name_length_limit: <int> | default = 0 ]
 
-# Per-scrape limit on length of labels value that will be accepted for a sample.
-# If a label value is longer than this number post metric-relabeling, the
-# entire scrape will be treated as failed. 0 means no limit.
+# Limit on the length (in bytes) of each individual label value. If any label
+# value in a scrape is longer than this number post metric-relabeling, the
+# entire scrape will be treated as failed. Note that label values are UTF-8
+# encoded, and characters can take up to 4 bytes. 0 means no limit.
 [ label_value_length_limit: <int> | default = 0 ]
 
-# Per-scrape config limit on number of unique targets that will be
+# Limit per scrape config on number of unique targets that will be
 # accepted. If more than this number of targets are present after target
 # relabeling, Prometheus will mark the targets as failed without scraping them.
 # 0 means no limit. This is an experimental feature, this behaviour could
 # change in the future.
 [ target_limit: <int> | default = 0 ]
 
-# Per-job limit on the number of targets dropped by relabeling
+# Limit per scrape config on the number of targets dropped by relabeling
 # that will be kept in memory. 0 means no limit.
 [ keep_dropped_targets: <int> | default = 0 ]
 
-# Specifies the validation scheme for metric and label names. Either blank or
-# "legacy" for letters, numbers, colons, and underscores; or "utf8" for full
-# UTF-8 support.
-[ metric_name_validation_scheme <string> | default "legacy" ]
+# Specifies the validation scheme for metric and label names. Either blank or 
+# "utf8" for full UTF-8 support, or "legacy" for letters, numbers, colons, and
+# underscores.
+[ metric_name_validation_scheme <string> | default "utf8" ]
 
 # Limit on total number of positive and negative buckets allowed in a single
 # native histogram. The resolution of a histogram with more buckets will be
@@ -684,11 +693,13 @@ subscription_id: <string>
 # Authentication information used to authenticate to the Azure API.
 # Note that `basic_auth`, `authorization` and `oauth2` options are
 # mutually exclusive.
+# `username` and `username_file` are mutually exclusive.
 # `password` and `password_file` are mutually exclusive.
 
 # Optional HTTP basic authentication information, currently not support by Azure.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -785,14 +796,17 @@ The following meta labels are available on targets during [relabeling](#relabel_
 services:
   [ - <string> ]
 
-# See https://www.consul.io/api/catalog.html#list-nodes-for-service to know more
-# about the possible filters that can be used.
+# A Consul Filter expression used to filter the catalog results
+# See https://www.consul.io/api-docs/catalog#list-services to know more
+# about the filter expressions that can be used.
+[ filter: <string> ]
 
+# The `tags` and `node_meta` fields are deprecated in Consul in favor of `filter`.
 # An optional list of tags used to filter nodes for a given service. Services must contain all tags in the list.
 tags:
   [ - <string> ]
 
-# Node metadata key/value pairs to filter nodes for a given service.
+# Node metadata key/value pairs to filter nodes for a given service. As of Consul 1.14, consider `filter` instead.
 [ node_meta:
   [ <string>: <string> ... ] ]
 
@@ -809,11 +823,13 @@ tags:
 # Authentication information used to authenticate to the consul server.
 # Note that `basic_auth`, `authorization` and `oauth2` options are
 # mutually exclusive.
+# `username` and `username_file` are mutually exclusive.
 # `password` and `password_file` are mutually exclusive.
 
 # Optional HTTP basic authentication information.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -907,11 +923,13 @@ The following meta labels are available on targets during [relabeling](#relabel_
 # Authentication information used to authenticate to the API server.
 # Note that `basic_auth` and `authorization` options are
 # mutually exclusive.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 
 # Optional HTTP basic authentication information, not currently supported by DigitalOcean.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -1055,11 +1073,13 @@ tls_config:
 # Authentication information used to authenticate to the Docker daemon.
 # Note that `basic_auth` and `authorization` options are
 # mutually exclusive.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 
 # Optional HTTP basic authentication information.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -1244,11 +1264,13 @@ role: <string>
 # Authentication information used to authenticate to the Docker daemon.
 # Note that `basic_auth` and `authorization` options are
 # mutually exclusive.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 
 # Optional HTTP basic authentication information.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -1391,11 +1413,13 @@ filters:
 # Authentication information used to authenticate to the EC2 API.
 # Note that `basic_auth`, `authorization` and `oauth2` options are
 # mutually exclusive.
+# `username` and `username_file` are mutually exclusive.
 # `password` and `password_file` are mutually exclusive.
 
 # Optional HTTP basic authentication information, currently not supported by AWS.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -1407,7 +1431,7 @@ authorization:
   # `credentials_file`.
   [ credentials: <secret> ]
   # Sets the credentials to the credentials read from the configured file.
-  # It is mutuall exclusive with `credentials`.
+  # It is mutually exclusive with `credentials`.
   [ credentials_file: <filename> ]
 
 # Optional OAuth 2.0 configuration, currently not supported by AWS.
@@ -1684,6 +1708,7 @@ tls_config:
 # Optional HTTP basic authentication information.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -1915,12 +1940,14 @@ role: <string>
 # Authentication information used to authenticate to the API server.
 # Note that `basic_auth` and `authorization` options are
 # mutually exclusive.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 
 # Optional HTTP basic authentication information, required when role is robot
 # Role hcloud does not support basic auth.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -2024,11 +2051,13 @@ url: <string>
 # Authentication information used to authenticate to the API server.
 # Note that `basic_auth`, `authorization` and `oauth2` options are
 # mutually exclusive.
+# `username` and `username_file` are mutually exclusive.
 # `password` and `password_file` are mutually exclusive.
 
 # Optional HTTP basic authentication information.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -2116,12 +2145,14 @@ datacenter_id: <string>
 # Authentication information used to authenticate to the API server.
 # Note that `basic_auth` and `authorization` options are
 # mutually exclusive.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 
 # Optional HTTP basic authentication information, required when using IONOS
 # Cloud username and password as authentication method.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -2298,6 +2329,8 @@ The `endpointslice` role discovers targets from existing endpointslices. For eac
 address referenced in the endpointslice object one target is discovered. If the endpoint is backed by a pod, all
 additional container ports of the pod, not bound to an endpoint port, are discovered as targets as well.
 
+The role requires the `discovery.k8s.io/v1` API version (available since Kubernetes v1.21).
+
 Available meta labels:
 
 * `__meta_kubernetes_namespace`: The namespace of the endpoints object.
@@ -2318,7 +2351,7 @@ Available meta labels:
   * `__meta_kubernetes_endpointslice_endpoint_topology_present_kubernetes_io_hostname`: Flag that shows if the referenced object has a kubernetes.io/hostname annotation.
   * `__meta_kubernetes_endpointslice_endpoint_hostname`: Hostname of the referenced endpoint.
   * `__meta_kubernetes_endpointslice_endpoint_node_name`: Name of the Node hosting the referenced endpoint.
-  * `__meta_kubernetes_endpointslice_endpoint_zone`: Zone the referenced endpoint exists in (only available when using the `discovery.k8s.io/v1` API group).
+  * `__meta_kubernetes_endpointslice_endpoint_zone`: Zone the referenced endpoint exists in.
   * `__meta_kubernetes_endpointslice_port`: Port of the referenced endpoint.
   * `__meta_kubernetes_endpointslice_port_name`: Named port of the referenced endpoint.
   * `__meta_kubernetes_endpointslice_port_protocol`: Protocol of the referenced endpoint.
@@ -2330,6 +2363,8 @@ Available meta labels:
 The `ingress` role discovers a target for each path of each ingress.
 This is generally useful for blackbox monitoring of an ingress.
 The address will be set to the host specified in the ingress spec.
+
+The role requires the `networking.k8s.io/v1` API version (available since Kubernetes v1.19).
 
 Available meta labels:
 
@@ -2364,11 +2399,13 @@ role: <string>
 
 # Optional authentication information used to authenticate to the API server.
 # Note that `basic_auth` and `authorization` options are mutually exclusive.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 
 # Optional HTTP basic authentication information.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -2522,11 +2559,13 @@ tls_config:
 # Authentication information used to authenticate to the Docker daemon.
 # Note that `basic_auth` and `authorization` options are
 # mutually exclusive.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 
 # Optional HTTP basic authentication information.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -2607,11 +2646,13 @@ See below for the configuration options for Lightsail discovery:
 # Authentication information used to authenticate to the Lightsail API.
 # Note that `basic_auth`, `authorization` and `oauth2` options are
 # mutually exclusive.
+# `username` and `username_file` are mutually exclusive.
 # `password` and `password_file` are mutually exclusive.
 
 # Optional HTTP basic authentication information, currently not supported by AWS.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -2623,7 +2664,7 @@ authorization:
   # `credentials_file`.
   [ credentials: <secret> ]
   # Sets the credentials to the credentials read from the configured file.
-  # It is mutuall exclusive with `credentials`.
+  # It is mutually exclusive with `credentials`.
   [ credentials_file: <filename> ]
 
 # Optional OAuth 2.0 configuration, currently not supported by AWS.
@@ -2703,12 +2744,14 @@ The following meta labels are available on targets during [relabeling](#relabel_
 # Authentication information used to authenticate to the API server.
 # Note that `basic_auth` and `authorization` options are
 # mutually exclusive.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 # Note: Linode APIv4 Token must be created with scopes: 'linodes:read_only', 'ips:read_only', and 'events:read_only'
 
 # Optional HTTP basic authentication information, not currently supported by Linode APIv4.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -2816,9 +2859,11 @@ servers:
 # Sets the `Authorization` header on every request with the
 # configured username and password.
 # This is mutually exclusive with other authentication mechanisms.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -2938,11 +2983,13 @@ The following meta labels are available on targets during [relabeling](#relabel_
 # Authentication information used to authenticate to the nomad server.
 # Note that `basic_auth`, `authorization` and `oauth2` options are
 # mutually exclusive.
+# `username` and `username_file` are mutually exclusive.
 # `password` and `password_file` are mutually exclusive.
 
 # Optional HTTP basic authentication information.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -3133,9 +3180,11 @@ server: <string>
 
 # Sets the `Authorization` header on every request with the
 # configured username and password.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -3366,6 +3415,7 @@ password: <secret>
 # Optional HTTP basic authentication information, currently not supported by Uyuni.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -3455,11 +3505,13 @@ The following meta labels are available on targets during [relabeling](#relabel_
 # Authentication information used to authenticate to the API server.
 # Note that `basic_auth` and `authorization` options are
 # mutually exclusive.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 
 # Optional HTTP basic authentication information, not currently supported by Vultr.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -3671,9 +3723,11 @@ through the `__alerts_path__` label.
 
 # Sets the `Authorization` header on every request with the
 # configured username and password.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -3917,9 +3971,11 @@ write_relabel_configs:
 
 # Sets the `Authorization` header on every remote write request with the
 # configured username and password.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
@@ -3984,7 +4040,7 @@ azuread:
 # Cannot be used at the same time as basic_auth, authorization, oauth2, sigv4 or azuread.
 # To use the default credentials from the Google Cloud SDK, use `google_iam: {}`.
 google_iam:
-  # Service account key with monitoring write permessions.
+  # Service account key with monitoring write permissions.
   credentials_file: <file_name>
 
 # Configures the remote write request's TLS settings.
@@ -4098,9 +4154,11 @@ headers:
 
 # Sets the `Authorization` header on every remote read request with the
 # configured username and password.
+# username and username_file are mutually exclusive.
 # password and password_file are mutually exclusive.
 basic_auth:
   [ username: <string> ]
+  [ username_file: <string> ]
   [ password: <secret> ]
   [ password_file: <string> ]
 
