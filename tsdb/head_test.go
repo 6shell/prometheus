@@ -38,8 +38,6 @@ import (
 	"go.uber.org/atomic"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/prometheus/prometheus/util/compression"
-
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/exemplar"
 	"github.com/prometheus/prometheus/model/histogram"
@@ -54,6 +52,7 @@ import (
 	"github.com/prometheus/prometheus/tsdb/tombstones"
 	"github.com/prometheus/prometheus/tsdb/tsdbutil"
 	"github.com/prometheus/prometheus/tsdb/wlog"
+	"github.com/prometheus/prometheus/util/compression"
 	"github.com/prometheus/prometheus/util/testutil"
 )
 
@@ -164,6 +163,8 @@ func populateTestWL(t testing.TB, w *wlog.WL, recs []interface{}) {
 			require.NoError(t, w.Log(enc.Exemplars(v, nil)))
 		case []record.RefMmapMarker:
 			require.NoError(t, w.Log(enc.MmapMarkers(v, nil)))
+		case []record.RefMetadata:
+			require.NoError(t, w.Log(enc.Metadata(v, nil)))
 		}
 	}
 }
@@ -714,13 +715,22 @@ func TestHead_ReadWAL(t *testing.T) {
 				[]record.RefSample{
 					{Ref: 10, T: 101, V: 5},
 					{Ref: 50, T: 101, V: 6},
+					// Sample for duplicate series record.
 					{Ref: 101, T: 101, V: 7},
 				},
 				[]tombstones.Stone{
 					{Ref: 0, Intervals: []tombstones.Interval{{Mint: 99, Maxt: 101}}},
+					// Tombstone for duplicate series record.
+					{Ref: 101, Intervals: []tombstones.Interval{{Mint: 0, Maxt: 100}}},
 				},
 				[]record.RefExemplar{
 					{Ref: 10, T: 100, V: 1, Labels: labels.FromStrings("trace_id", "asdf")},
+					// Exemplar for duplicate series record.
+					{Ref: 101, T: 101, V: 7, Labels: labels.FromStrings("trace_id", "zxcv")},
+				},
+				[]record.RefMetadata{
+					// Metadata for duplicate series record.
+					{Ref: 101, Type: uint8(record.Counter), Unit: "foo", Help: "total foo"},
 				},
 			}
 
@@ -766,23 +776,46 @@ func TestHead_ReadWAL(t *testing.T) {
 				return x
 			}
 
+			// Verify samples and exemplar for series 10.
 			c, _, _, err := s10.chunk(0, head.chunkDiskMapper, &head.memChunkPool)
 			require.NoError(t, err)
 			require.Equal(t, []sample{{100, 2, nil, nil}, {101, 5, nil, nil}}, expandChunk(c.chunk.Iterator(nil)))
+
+			q, err := head.ExemplarQuerier(context.Background())
+			require.NoError(t, err)
+			e, err := q.Select(0, 1000, []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "a", "1")})
+			require.NoError(t, err)
+			require.NotEmpty(t, e)
+			require.NotEmpty(t, e[0].Exemplars)
+			require.True(t, exemplar.Exemplar{Ts: 100, Value: 1, Labels: labels.FromStrings("trace_id", "asdf")}.Equals(e[0].Exemplars[0]))
+
+			// Verify samples for series 50
 			c, _, _, err = s50.chunk(0, head.chunkDiskMapper, &head.memChunkPool)
 			require.NoError(t, err)
 			require.Equal(t, []sample{{101, 6, nil, nil}}, expandChunk(c.chunk.Iterator(nil)))
+
+			// Verify records for series 100 and its duplicate, series 101.
 			// The samples before the new series record should be discarded since a duplicate record
 			// is only possible when old samples were compacted.
 			c, _, _, err = s100.chunk(0, head.chunkDiskMapper, &head.memChunkPool)
 			require.NoError(t, err)
 			require.Equal(t, []sample{{101, 7, nil, nil}}, expandChunk(c.chunk.Iterator(nil)))
 
-			q, err := head.ExemplarQuerier(context.Background())
+			q, err = head.ExemplarQuerier(context.Background())
 			require.NoError(t, err)
-			e, err := q.Select(0, 1000, []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "a", "1")})
+			e, err = q.Select(0, 1000, []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "a", "3")})
 			require.NoError(t, err)
-			require.True(t, exemplar.Exemplar{Ts: 100, Value: 1, Labels: labels.FromStrings("trace_id", "asdf")}.Equals(e[0].Exemplars[0]))
+			require.NotEmpty(t, e)
+			require.NotEmpty(t, e[0].Exemplars)
+			require.True(t, exemplar.Exemplar{Ts: 101, Value: 7, Labels: labels.FromStrings("trace_id", "zxcv")}.Equals(e[0].Exemplars[0]))
+
+			require.NotNil(t, s100.meta)
+			require.Equal(t, "foo", s100.meta.Unit)
+			require.Equal(t, "total foo", s100.meta.Help)
+
+			intervals, err := head.tombstones.Get(storage.SeriesRef(s100.ref))
+			require.NoError(t, err)
+			require.Equal(t, tombstones.Intervals{{Mint: 0, Maxt: 100}}, intervals)
 		})
 	}
 }
@@ -2829,7 +2862,6 @@ func TestOutOfOrderSamplesMetric(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			options := DefaultOptions()
 			options.EnableNativeHistograms = true
-			options.EnableOOONativeHistograms = true
 			testOutOfOrderSamplesMetric(t, scenario, options, storage.ErrOutOfOrderSample)
 		})
 	}
@@ -2842,10 +2874,9 @@ func TestOutOfOrderSamplesMetricNativeHistogramOOODisabled(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			options := DefaultOptions()
-			options.OutOfOrderTimeWindow = (1000 * time.Minute).Milliseconds()
+			options.OutOfOrderTimeWindow = 0
 			options.EnableNativeHistograms = true
-			options.EnableOOONativeHistograms = false
-			testOutOfOrderSamplesMetric(t, scenario, options, storage.ErrOOONativeHistogramsDisabled)
+			testOutOfOrderSamplesMetric(t, scenario, options, storage.ErrOutOfOrderSample)
 		})
 	}
 }
@@ -4784,7 +4815,6 @@ func TestOOOHistogramCounterResetHeaders(t *testing.T) {
 			l := labels.FromStrings("a", "b")
 			head, _ := newTestHead(t, 1000, compression.None, true)
 			head.opts.OutOfOrderCapMax.Store(5)
-			head.opts.EnableOOONativeHistograms.Store(true)
 
 			t.Cleanup(func() {
 				require.NoError(t, head.Close())
@@ -4943,7 +4973,6 @@ func TestAppendingDifferentEncodingToSameSeries(t *testing.T) {
 	dir := t.TempDir()
 	opts := DefaultOptions()
 	opts.EnableNativeHistograms = true
-	opts.EnableOOONativeHistograms = true
 	db, err := Open(dir, nil, nil, opts, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -5215,7 +5244,6 @@ func testWBLReplay(t *testing.T, scenario sampleTypeScenario) {
 	opts.ChunkDirRoot = dir
 	opts.OutOfOrderTimeWindow.Store(30 * time.Minute.Milliseconds())
 	opts.EnableNativeHistograms.Store(true)
-	opts.EnableOOONativeHistograms.Store(true)
 
 	h, err := NewHead(nil, nil, wal, oooWlog, opts, nil)
 	require.NoError(t, err)
@@ -5310,7 +5338,6 @@ func testOOOMmapReplay(t *testing.T, scenario sampleTypeScenario) {
 	opts.OutOfOrderCapMax.Store(30)
 	opts.OutOfOrderTimeWindow.Store(1000 * time.Minute.Milliseconds())
 	opts.EnableNativeHistograms.Store(true)
-	opts.EnableOOONativeHistograms.Store(true)
 
 	h, err := NewHead(nil, nil, wal, oooWlog, opts, nil)
 	require.NoError(t, err)
@@ -5613,7 +5640,6 @@ func testOOOAppendWithNoSeries(t *testing.T, appendFunc func(appender storage.Ap
 	opts.OutOfOrderCapMax.Store(30)
 	opts.OutOfOrderTimeWindow.Store(120 * time.Minute.Milliseconds())
 	opts.EnableNativeHistograms.Store(true)
-	opts.EnableOOONativeHistograms.Store(true)
 
 	h, err := NewHead(nil, nil, wal, oooWlog, opts, nil)
 	require.NoError(t, err)
@@ -5705,7 +5731,6 @@ func testHeadMinOOOTimeUpdate(t *testing.T, scenario sampleTypeScenario) {
 	opts.ChunkDirRoot = dir
 	opts.OutOfOrderTimeWindow.Store(10 * time.Minute.Milliseconds())
 	opts.EnableNativeHistograms.Store(true)
-	opts.EnableOOONativeHistograms.Store(true)
 
 	h, err := NewHead(nil, nil, wal, oooWlog, opts, nil)
 	require.NoError(t, err)
@@ -5776,7 +5801,7 @@ func TestGaugeHistogramWALAndChunkHeader(t *testing.T) {
 		expHeaders := []chunkenc.CounterResetHeader{
 			chunkenc.UnknownCounterReset,
 			chunkenc.GaugeType,
-			chunkenc.UnknownCounterReset,
+			chunkenc.NotCounterReset,
 			chunkenc.GaugeType,
 		}
 		for i, mmapChunk := range ms.mmappedChunks {
